@@ -419,7 +419,15 @@ func printMarkdown(text string) {
 			text = rendered
 		}
 	}
-	printPadded(text)
+	fmt.Println()
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			fmt.Println()
+			continue
+		}
+		fmt.Printf(" %s\n", strings.TrimRight(line, " \t"))
+	}
+	fmt.Println()
 }
 
 func printPadded(text string) {
