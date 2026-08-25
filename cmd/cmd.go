@@ -67,7 +67,7 @@ func askSinglePrompt() error {
 	}
 
 	body, err := json.Marshal(chatRequest{
-		Model:    "@preset/mimo",
+		Model:    "openai/gpt-5.6-luna",
 		Messages: []message{{Role: "user", Content: input}},
 	})
 	if err != nil {
