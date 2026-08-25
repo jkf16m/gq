@@ -71,7 +71,7 @@ func askSinglePrompt() error {
 	if err != nil {
 		return err
 	}
-	fmt.Print("\033[1;36mgq\033[0m \\033[2m›\\033[0m ")
+	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
 		return fmt.Errorf("read prompt: %w", err)
@@ -93,7 +93,7 @@ func askSinglePrompt() error {
 		assistant := response.Choices[0].Message
 		if len(assistant.ToolCalls) == 0 {
 			if text, ok := assistant.Content.(string); ok {
-				fmt.Println(text)
+				printPadded(text)
 			}
 			return nil
 		}
@@ -108,7 +108,7 @@ func askSinglePrompt() error {
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				return fmt.Errorf("invalid cmd arguments: %w", err)
 			}
-			fmt.Printf("\033[2m$ %s\033[0m\n", args.Command)
+			fmt.Printf("\n \033[2m$ %s\033[0m\n", args.Command)
 			approved, err := approveToolCall()
 			if err != nil {
 				return err
@@ -190,7 +190,7 @@ func approveToolCall() (bool, error) {
 		}
 		switch b[0] {
 		case 8, 127:
-			fmt.Println(" rejected")
+			fmt.Println(" rejected\n")
 			return false, nil
 		case '\r', '\n':
 			if enters == 0 {
@@ -199,13 +199,21 @@ func approveToolCall() (bool, error) {
 				continue
 			}
 			if time.Since(firstEnter) < 2*time.Second {
-				fmt.Println(" approved")
+				fmt.Println(" approved\n")
 				return true, nil
 			}
 			enters = 1
 			firstEnter = time.Now()
 		}
 	}
+}
+
+func printPadded(text string) {
+	fmt.Println()
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		fmt.Printf(" %s\n", line)
+	}
+	fmt.Println()
 }
 
 func runCommand(command string) (string, int) {
