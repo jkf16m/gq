@@ -102,6 +102,13 @@ func askSinglePrompt() error {
 		messages = append(messages, message{Role: "system", Content: loadedConfig.Context})
 	}
 	messages = append(messages, message{Role: "user", Content: input})
+	return runConversation(apiKey, messages, false)
+}
+
+func runConversation(apiKey string, messages []message, continuing bool) error {
+	if err := saveSession(messages, !continuing); err != nil {
+		return err
+	}
 	for step := 0; step < 20; step++ {
 		response, err := complete(apiKey, messages)
 		if err != nil {
@@ -118,6 +125,9 @@ func askSinglePrompt() error {
 			return nil
 		}
 		messages = append(messages, assistant)
+		if err := saveSession(messages, false); err != nil {
+			return err
+		}
 		for _, call := range assistant.ToolCalls {
 			if call.Function.Name != "cmd" {
 				return fmt.Errorf("unsupported tool: %s", call.Function.Name)
@@ -139,9 +149,106 @@ func askSinglePrompt() error {
 			}
 			output, exitCode := runCommand(args.Command)
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: fmt.Sprintf("exit code: %d\n%s", exitCode, output)})
+			if err := saveSession(messages, false); err != nil {
+				return err
+			}
 		}
 	}
 	return fmt.Errorf("agent exceeded maximum tool steps")
+}
+
+func continueSession() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".gq", "sessions", "last.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read last session: %w", err)
+	}
+	var messages []message
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var msg message
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			return fmt.Errorf("parse session: %w", err)
+		}
+		messages = append(messages, msg)
+	}
+	if len(messages) == 0 {
+		return fmt.Errorf("last session is empty")
+	}
+	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
+	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(input) == 0 {
+		return err
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil
+	}
+	messages = append(messages, message{Role: "user", Content: input})
+	apiKey, err := getOpenRouterAPIKey()
+	if err != nil {
+		return err
+	}
+	return runConversation(apiKey, messages, true)
+}
+
+func saveSession(messages []message, replace bool) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".gq", "sessions")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "last.jsonl")
+	flag := os.O_CREATE | os.O_WRONLY
+	if replace {
+		flag |= os.O_TRUNC
+	} else {
+		flag |= os.O_APPEND
+	}
+	file, err := os.OpenFile(path, flag, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if replace {
+		for _, msg := range messages {
+			data, _ := json.Marshal(msg)
+			fmt.Fprintln(file, string(data))
+		}
+	} else {
+		// Rewrite to avoid duplicating messages as the in-memory conversation grows.
+		if err := file.Close(); err != nil {
+			return err
+		}
+		data, _ := json.Marshal(messages)
+		_ = data
+		return writeSession(path, messages)
+	}
+	return nil
+}
+
+func writeSession(path string, messages []message) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for _, msg := range messages {
+		data, _ := json.Marshal(msg)
+		if _, err := fmt.Fprintln(file, string(data)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func complete(apiKey string, messages []message) (chatResponse, error) {
@@ -307,4 +414,8 @@ func getOpenRouterAPIKey() (string, error) {
 }
 
 func Execute() error { return rootCmd.Execute() }
-func init()          { rootCmd.AddCommand(versionCmd); rootCmd.AddCommand(modelCmd) }
+func init() {
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(modelCmd)
+	rootCmd.AddCommand(&cobra.Command{Use: "c", Aliases: []string{"continue"}, Short: "Continue the last session", RunE: func(cmd *cobra.Command, args []string) error { return continueSession() }})
+}
