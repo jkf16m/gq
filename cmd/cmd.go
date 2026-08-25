@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
@@ -107,6 +109,14 @@ func askSinglePrompt() error {
 				return fmt.Errorf("invalid cmd arguments: %w", err)
 			}
 			fmt.Printf("\033[2m$ %s\033[0m\n", args.Command)
+			approved, err := approveToolCall()
+			if err != nil {
+				return err
+			}
+			if !approved {
+				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "Tool call rejected by user."})
+				continue
+			}
 			output, exitCode := runCommand(args.Command)
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: fmt.Sprintf("exit code: %d\n%s", exitCode, output)})
 		}
@@ -143,6 +153,59 @@ func complete(apiKey string, messages []message) (chatResponse, error) {
 		return response, fmt.Errorf("OpenRouter returned HTTP %s", res.Status)
 	}
 	return response, nil
+}
+
+func approveToolCall() (bool, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, fmt.Errorf("tool approval requires an interactive terminal")
+	}
+
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return false, fmt.Errorf("enable tool approval input: %w", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	fmt.Print("Approve? Press Enter twice within 2s, or Backspace to reject: ")
+	enters := 0
+	var firstEnter time.Time
+	fd := int(os.Stdin.Fd())
+	for {
+		var readfds syscall.FdSet
+		readfds.Bits[fd/64] |= 1 << (uint(fd) % 64)
+		timeout := syscall.Timeval{Sec: 0, Usec: 100000}
+		_, err := syscall.Select(fd+1, &readfds, nil, nil, &timeout)
+		if err != nil {
+			return false, fmt.Errorf("wait for tool approval: %w", err)
+		}
+		if enters == 1 && time.Since(firstEnter) >= 2*time.Second {
+			enters = 0
+		}
+		if readfds.Bits[fd/64]&(1<<(uint(fd)%64)) == 0 {
+			continue
+		}
+		var b [1]byte
+		if _, err := os.Stdin.Read(b[:]); err != nil {
+			return false, fmt.Errorf("read tool approval: %w", err)
+		}
+		switch b[0] {
+		case 8, 127:
+			fmt.Println(" rejected")
+			return false, nil
+		case '\r', '\n':
+			if enters == 0 {
+				enters = 1
+				firstEnter = time.Now()
+				continue
+			}
+			if time.Since(firstEnter) < 2*time.Second {
+				fmt.Println(" approved")
+				return true, nil
+			}
+			enters = 1
+			firstEnter = time.Now()
+		}
+	}
 }
 
 func runCommand(command string) (string, int) {
