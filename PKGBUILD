@@ -13,7 +13,7 @@ sha256sums=('SKIP')
 
 build() {
   cd "$srcdir"
-  go build -o gq ./cmd/gq
+  go run build.go build
 }
 
 package() {
