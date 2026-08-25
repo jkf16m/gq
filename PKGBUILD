@@ -12,10 +12,11 @@ sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  go build -o gq ./cmd/gq
+  mkdir -p dist
+  go build -o dist/gq ./cmd/gq
 }
 
 package() {
   cd "$srcdir/$pkgname-$pkgver"
-  install -Dm755 gq "$pkgdir/usr/bin/gq"
+  install -Dm755 dist/gq "$pkgdir/usr/bin/gq"
 }

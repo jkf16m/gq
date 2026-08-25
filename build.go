@@ -18,7 +18,8 @@ func main() {
 
 	switch os.Args[1] {
 	case "build":
-		cmd := exec.Command("go", "build", "-o", "gq", "./cmd/gq")
+		os.MkdirAll("dist", 0755)
+		cmd := exec.Command("go", "build", "-o", "dist/gq", "./cmd/gq")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
