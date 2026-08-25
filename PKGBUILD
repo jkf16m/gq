@@ -8,7 +8,7 @@ url="https://github.com/yourusername/gq"
 license=('MIT')
 depends=()
 makedepends=('go')
-source=("git+${url}")
+source=("git+file:///home/klip/projects/gq")
 sha256sums=('SKIP')
 
 build() {
