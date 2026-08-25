@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -125,7 +126,7 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 		assistant := response.Choices[0].Message
 		if len(assistant.ToolCalls) == 0 {
 			if text, ok := assistant.Content.(string); ok {
-				printPadded(text)
+				printMarkdown(text)
 			}
 			return nil
 		}
@@ -409,6 +410,16 @@ func approveToolCall() (bool, error) {
 			firstEnter = time.Now()
 		}
 	}
+}
+
+func printMarkdown(text string) {
+	renderer, err := glamour.NewTermRenderer(glamour.WithAutoStyle())
+	if err == nil {
+		if rendered, renderErr := renderer.Render(text); renderErr == nil {
+			text = rendered
+		}
+	}
+	printPadded(text)
 }
 
 func printPadded(text string) {
