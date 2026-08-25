@@ -13,7 +13,7 @@ sha256sums=('SKIP')
 build() {
   cd "$srcdir/$pkgname-$pkgver"
   mkdir -p bin
-  go build -o bin/gq ./cmd/gq
+  go build -o bin/gq .
 }
 
 package() {
