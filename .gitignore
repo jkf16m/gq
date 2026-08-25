@@ -1,5 +1,5 @@
 gq
-dist/
+bin/
 pkg/
 src/
 *.pkg.tar.zst
