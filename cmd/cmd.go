@@ -109,6 +109,11 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 	if err := saveSession(messages, !continuing); err != nil {
 		return err
 	}
+	if continuing {
+		if err := handlePendingTools(messages); err != nil {
+			return err
+		}
+	}
 	for step := 0; step < 20; step++ {
 		response, err := complete(apiKey, messages)
 		if err != nil {
@@ -184,7 +189,6 @@ func continueSession() error {
 	if len(messages) == 0 {
 		return fmt.Errorf("last session is empty")
 	}
-	messages = repairSession(messages)
 	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
@@ -200,6 +204,52 @@ func continueSession() error {
 		return err
 	}
 	return runConversation(apiKey, messages, true)
+}
+
+func handlePendingTools(messages []message) error {
+	completed := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role == "tool" {
+			completed[msg.ToolCallID] = true
+		}
+	}
+	for _, msg := range messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, call := range msg.ToolCalls {
+			if completed[call.ID] {
+				continue
+			}
+			if call.Function.Name != "cmd" {
+				return fmt.Errorf("unsupported tool: %s", call.Function.Name)
+			}
+			var args struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+				return err
+			}
+			fmt.Printf("\n \033[2m$ %s\033[0m\n", args.Command)
+			approved, err := approveToolCall()
+			if err != nil {
+				return err
+			}
+			var content string
+			if !approved {
+				content = "Tool call rejected by user."
+			} else {
+				output, code := runCommand(args.Command)
+				content = fmt.Sprintf("exit code: %d\n%s", code, output)
+			}
+			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: content})
+			if err := saveSession(messages, false); err != nil {
+				return err
+			}
+			completed[call.ID] = true
+		}
+	}
+	return nil
 }
 
 func repairSession(messages []message) []message {
