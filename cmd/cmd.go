@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"gq/config"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
@@ -67,6 +70,18 @@ type chatResponse struct {
 }
 
 func askSinglePrompt() error {
+	applicationPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find application path: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home directory: %w", err)
+	}
+	if _, err := config.Load("", home, filepath.Dir(applicationPath)); err != nil {
+		return err
+	}
+
 	apiKey, err := getOpenRouterAPIKey()
 	if err != nil {
 		return err
@@ -190,7 +205,8 @@ func approveToolCall() (bool, error) {
 		}
 		switch b[0] {
 		case 8, 127:
-			fmt.Println(" rejected\n")
+			fmt.Println(" rejected")
+			fmt.Println()
 			return false, nil
 		case '\r', '\n':
 			if enters == 0 {
@@ -199,7 +215,8 @@ func approveToolCall() (bool, error) {
 				continue
 			}
 			if time.Since(firstEnter) < 2*time.Second {
-				fmt.Println(" approved\n")
+				fmt.Println(" approved")
+				fmt.Println()
 				return true, nil
 			}
 			enters = 1
