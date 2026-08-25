@@ -78,7 +78,8 @@ func askSinglePrompt() error {
 	if err != nil {
 		return fmt.Errorf("find home directory: %w", err)
 	}
-	if _, err := config.Load("", home, filepath.Dir(applicationPath)); err != nil {
+	loadedConfig, err := config.Load("", home, filepath.Dir(applicationPath))
+	if err != nil {
 		return err
 	}
 
@@ -96,7 +97,11 @@ func askSinglePrompt() error {
 		return nil
 	}
 
-	messages := []message{{Role: "user", Content: input}}
+	messages := make([]message, 0, 2)
+	if loadedConfig.Context != "" {
+		messages = append(messages, message{Role: "system", Content: loadedConfig.Context})
+	}
+	messages = append(messages, message{Role: "user", Content: input})
 	for step := 0; step < 20; step++ {
 		response, err := complete(apiKey, messages)
 		if err != nil {

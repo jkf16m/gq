@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const configName = "config.json"
 
 type Result struct {
-	Values map[string]interface{}
-	Files  []string
+	Values  map[string]interface{}
+	Files   []string
+	Context string
 }
 
 // Load discovers and merges configuration for the directory containing cwd.
@@ -51,8 +53,12 @@ func Load(cwd, home, applicationDir string) (Result, error) {
 			return Result{}, err
 		}
 	}
+	if err := loadContextFiles(&result, paths); err != nil {
+		return Result{}, err
+	}
 
-	delete(result.Values, "keep_walking")
+	delete(result.Values, "keepWalking")
+	delete(result.Values, "contextFiles")
 	return result, nil
 }
 
@@ -71,7 +77,7 @@ func discover(cwd string) ([]string, error) {
 				return nil, fmt.Errorf("parse %s: %w", path, err)
 			}
 			paths = append(paths, path)
-			keepWalking, defined := values["keep_walking"].(bool)
+			keepWalking, defined := values["keepWalking"].(bool)
 			if !defined || !keepWalking {
 				break
 			}
@@ -85,6 +91,39 @@ func discover(cwd string) ([]string, error) {
 		cwd = parent
 	}
 	return paths, nil
+}
+
+func loadContextFiles(result *Result, paths []string) error {
+	var sections []string
+	for i := len(paths) - 1; i >= 0; i-- {
+		data, err := os.ReadFile(paths[i])
+		if err != nil {
+			return fmt.Errorf("read %s: %w", paths[i], err)
+		}
+		var values map[string]interface{}
+		if err := json.Unmarshal(data, &values); err != nil {
+			return fmt.Errorf("parse %s: %w", paths[i], err)
+		}
+		names, _ := values["contextFiles"].([]interface{})
+		base := filepath.Dir(filepath.Dir(paths[i]))
+		for _, rawName := range names {
+			name, ok := rawName.(string)
+			if !ok || name == "" {
+				continue
+			}
+			path := filepath.Join(base, name)
+			content, err := os.ReadFile(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("read context file %s: %w", path, err)
+			}
+			sections = append(sections, fmt.Sprintf("--- %s ---\n%s", path, strings.TrimSpace(string(content))))
+		}
+	}
+	result.Context = strings.Join(sections, "\n\n")
+	return nil
 }
 
 func mergeFile(result *Result, path string) error {
