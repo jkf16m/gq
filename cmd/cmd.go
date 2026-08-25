@@ -145,6 +145,9 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 			}
 			if !approved {
 				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "Tool call rejected by user."})
+				if err := saveSession(messages, false); err != nil {
+					return err
+				}
 				continue
 			}
 			output, exitCode := runCommand(args.Command)
@@ -181,6 +184,7 @@ func continueSession() error {
 	if len(messages) == 0 {
 		return fmt.Errorf("last session is empty")
 	}
+	messages = repairSession(messages)
 	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
@@ -196,6 +200,26 @@ func continueSession() error {
 		return err
 	}
 	return runConversation(apiKey, messages, true)
+}
+
+func repairSession(messages []message) []message {
+	var repaired []message
+	for i, msg := range messages {
+		repaired = append(repaired, msg)
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		seen := make(map[string]bool)
+		for j := i + 1; j < len(messages) && messages[j].Role == "tool"; j++ {
+			seen[messages[j].ToolCallID] = true
+		}
+		for _, call := range msg.ToolCalls {
+			if !seen[call.ID] {
+				repaired = append(repaired, message{Role: "tool", ToolCallID: call.ID, Content: "Tool call was not completed in the previous session and was rejected."})
+			}
+		}
+	}
+	return repaired
 }
 
 func saveSession(messages []message, replace bool) error {
