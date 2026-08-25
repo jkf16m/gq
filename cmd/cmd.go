@@ -209,11 +209,55 @@ func approveToolCall() (bool, error) {
 }
 
 func printPadded(text string) {
+	width := 80
+	if terminalWidth, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && terminalWidth > 10 {
+		width = terminalWidth - 2 // one padding character on each side
+	}
+
 	fmt.Println()
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+	for _, line := range wrapText(strings.TrimRight(text, "\n"), width) {
 		fmt.Printf(" %s\n", line)
 	}
 	fmt.Println()
+}
+
+func wrapText(text string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var wrapped []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		if strings.TrimSpace(paragraph) == "" {
+			wrapped = append(wrapped, "")
+			continue
+		}
+
+		words := strings.Fields(paragraph)
+		line := ""
+		for _, word := range words {
+			for len([]rune(word)) > width {
+				part := string([]rune(word)[:width])
+				if line != "" {
+					wrapped = append(wrapped, line)
+					line = ""
+				}
+				wrapped = append(wrapped, part)
+				word = string([]rune(word)[width:])
+			}
+			if line == "" {
+				line = word
+			} else if len([]rune(line))+1+len([]rune(word)) <= width {
+				line += " " + word
+			} else {
+				wrapped = append(wrapped, line)
+				line = word
+			}
+		}
+		if line != "" {
+			wrapped = append(wrapped, line)
+		}
+	}
+	return wrapped
 }
 
 func runCommand(command string) (string, int) {
