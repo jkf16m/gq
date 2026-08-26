@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/glamour"
@@ -91,7 +91,7 @@ func askSinglePrompt() error {
 	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
-		return fmt.Errorf("read prompt: %w", err)
+		return err
 	}
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -107,6 +107,8 @@ func askSinglePrompt() error {
 }
 
 func runConversation(apiKey string, messages []message, continuing bool) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 	if err := saveSession(messages, !continuing); err != nil {
 		return err
 	}
@@ -116,7 +118,7 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 		}
 	}
 	for step := 0; step < 20; step++ {
-		response, err := complete(apiKey, messages)
+		response, err := complete(ctx, apiKey, messages)
 		if err != nil {
 			return err
 		}
@@ -144,7 +146,6 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				return fmt.Errorf("invalid cmd arguments: %w", err)
 			}
-			fmt.Printf("\n \033[2m$ %s\033[0m\n", args.Command)
 			approved, err := approveToolCall()
 			if err != nil {
 				return err
@@ -157,6 +158,7 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 				continue
 			}
 			output, exitCode := runCommand(args.Command)
+			printToolResult(args.Command, output, exitCode)
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: fmt.Sprintf("exit code: %d\n%s", exitCode, output)})
 			if err := saveSession(messages, false); err != nil {
 				return err
@@ -193,7 +195,7 @@ func continueSession() error {
 	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
-		return err
+		return fmt.Errorf("read prompt: %w", err)
 	}
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -231,7 +233,6 @@ func handlePendingTools(messages []message) error {
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				return err
 			}
-			fmt.Printf("\n \033[2m$ %s\033[0m\n", args.Command)
 			approved, err := approveToolCall()
 			if err != nil {
 				return err
@@ -241,6 +242,7 @@ func handlePendingTools(messages []message) error {
 				content = "Tool call rejected by user."
 			} else {
 				output, code := runCommand(args.Command)
+				printToolResult(args.Command, output, code)
 				content = fmt.Sprintf("exit code: %d\n%s", code, output)
 			}
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: content})
@@ -326,13 +328,15 @@ func writeSession(path string, messages []message) error {
 	return nil
 }
 
-func complete(apiKey string, messages []message) (chatResponse, error) {
+func complete(ctx context.Context, apiKey string, messages []message) (chatResponse, error) {
 	body, err := json.Marshal(chatRequest{Model: "openai/gpt-5.6-luna", Messages: messages, Tools: []tool{{Type: "function", Function: functionDefinition{Name: "cmd", Description: "Run one bash command in the current project. Return the command as a bash string.", Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"command": map[string]string{"type": "string", "description": "The bash command to run"}}, "required": []string{"command"}}}}}})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("encode request: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	stopSpinner := startSpinner(ctx)
+	defer stopSpinner()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openRouterURL, bytes.NewReader(body))
 	if err != nil {
 		return chatResponse{}, err
@@ -358,58 +362,91 @@ func complete(apiKey string, messages []message) (chatResponse, error) {
 }
 
 func approveToolCall() (bool, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return false, fmt.Errorf("tool approval requires an interactive terminal")
+	tty, err := openApprovalTTY()
+	if err != nil {
+		return false, err
+	}
+	if tty != os.Stdin {
+		defer tty.Close()
 	}
 
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	fd := int(tty.Fd())
+	if !!term.IsTerminal(fd) {
+		return false, fmt.Errorf("tool approval requires an interactive terminal")
+	}
+	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return false, fmt.Errorf("enable tool approval input: %w", err)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer term.Restore(fd, oldState)
 
-	fmt.Print("Approve? Press Enter twice within 2s, or Backspace to reject: ")
+	// Reading in a goroutine lets the timer expire without platform-specific
+	// polling APIs. Closing a fallback TTY on return releases that reader.
+	input := make(chan byte, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		var b [1]byte
+		for {
+			if _, err := tty.Read(b[:]); err != nil {
+				readErr <- err
+				return
+			}
+			input <- b[0]
+		}
+	}()
+
 	enters := 0
 	var firstEnter time.Time
-	fd := int(os.Stdin.Fd())
 	for {
-		var readfds syscall.FdSet
-		readfds.Bits[fd/64] |= 1 << (uint(fd) % 64)
-		timeout := syscall.Timeval{Sec: 0, Usec: 100000}
-		_, err := syscall.Select(fd+1, &readfds, nil, nil, &timeout)
-		if err != nil {
-			return false, fmt.Errorf("wait for tool approval: %w", err)
+		var timeout <-chan time.Time
+		var timer *time.Timer
+		if enters == 1 {
+			timer = time.NewTimer(time.Until(firstEnter.Add(2 * time.Second)))
+			timeout = timer.C
 		}
-		if enters == 1 && time.Since(firstEnter) >= 2*time.Second {
+
+		select {
+		case <-timeout:
 			enters = 0
-		}
-		if readfds.Bits[fd/64]&(1<<(uint(fd)%64)) == 0 {
-			continue
-		}
-		var b [1]byte
-		if _, err := os.Stdin.Read(b[:]); err != nil {
+		case err := <-readErr:
+			if timer != nil {
+				timer.Stop()
+			}
 			return false, fmt.Errorf("read tool approval: %w", err)
-		}
-		switch b[0] {
-		case 8, 127:
-			fmt.Println(" rejected")
-			fmt.Println()
-			return false, nil
-		case '\r', '\n':
-			if enters == 0 {
+		case b := <-input:
+			if timer != nil {
+				timer.Stop()
+			}
+			switch b {
+			case 8, 127:
+				return false, nil
+			case '\r', '\n':
+				if enters == 0 {
+					enters = 1
+					firstEnter = time.Now()
+					continue
+				}
+				if time.Since(firstEnter) < 2*time.Second {
+					return true, nil
+				}
 				enters = 1
 				firstEnter = time.Now()
-				continue
 			}
-			if time.Since(firstEnter) < 2*time.Second {
-				fmt.Println(" approved")
-				fmt.Println()
-				return true, nil
-			}
-			enters = 1
-			firstEnter = time.Now()
 		}
 	}
+}
+
+func openApprovalTTY() (*os.File, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return os.Stdin, nil
+	}
+	for _, path := range []string{"/dev/tty", "CONIN$"} {
+		tty, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err == nil {
+			return tty, nil
+		}
+	}
+	return nil, fmt.Errorf("tool approval requires an interactive terminal")
 }
 
 func printMarkdown(text string) {
@@ -504,6 +541,50 @@ func getOpenRouterAPIKey() (string, error) {
 		return "", fmt.Errorf("empty API key from pass")
 	}
 	return key, nil
+}
+
+func startSpinner(ctx context.Context) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		frames := []string{"|", "/", "-", "\\"}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Printf("\rWaiting for response %s (Ctrl-C to cancel)", frames[i%len(frames)])
+				i++
+			case <-done:
+				fmt.Print("\r\033[K")
+				return
+			case <-ctx.Done():
+				fmt.Print("\r\033[K")
+				return
+			}
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		<-stopped
+	}
+}
+
+func printToolResult(command, output string, exitCode int) {
+	fmt.Printf("\n \033[2m$ %s\033[0m\n", command)
+	fmt.Printf(" exit code: %d\n", exitCode)
+	if output != "" {
+		for _, line := range strings.Split(strings.TrimRight(output, "\n"), "\n") {
+			fmt.Printf(" %s\n", line)
+		}
+	}
+	fmt.Println()
 }
 
 func Execute() error { return rootCmd.Execute() }
