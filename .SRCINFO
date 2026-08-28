@@ -1,0 +1,12 @@
+pkgbase = gq
+	pkgdesc = A terminal AI agent with explicit shell-command approval
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/jkf16m/gq
+	arch = x86_64
+	license = MIT
+	makedepends = go
+	source = gq-0.1.0.tar.gz::https://github.com/jkf16m/gq/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = a347ff4293677ab9eb60643ef48a9e95129232a10db301dc8334828d5a469113
+
+pkgname = gq

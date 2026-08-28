@@ -60,6 +60,20 @@ go run build.go clean
 - Prefer small, idiomatic Go changes. Return wrapped errors with useful context and avoid ignoring errors unless there is a deliberate reason.
 - Do not commit generated binaries, package archives, credentials, home-directory session data, or unrelated formatting changes.
 
+## Arch Linux installation
+
+Use Arch Linux packaging as the standard installation approach. From the
+repository root, build and install the current checkout with:
+
+```bash
+makepkg -si
+```
+
+The `PKGBUILD` builds the local checkout and installs the binary as
+`/usr/bin/gq`. Do not use `go install` as the normal installation path. After
+source changes, rerun `makepkg -si` (or `makepkg -f` to rebuild without
+installing) so the installed binary is current.
+
 ## Verification checklist
 
 Before submitting a change:

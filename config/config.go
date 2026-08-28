@@ -13,13 +13,14 @@ const configName = "config.json"
 type Result struct {
 	Values  map[string]interface{}
 	Files   []string
+	Sources map[string]string
 	Context string
 }
 
 // Load discovers and merges configuration for the directory containing cwd.
 // Defaults are applied first; home and project configuration override them.
 func Load(cwd, home, applicationDir string) (Result, error) {
-	result := Result{Values: make(map[string]interface{})}
+	result := Result{Values: make(map[string]interface{}), Sources: make(map[string]string)}
 
 	// The application default is the lowest-precedence layer.
 	for _, path := range []string{
@@ -137,6 +138,9 @@ func mergeFile(result *Result, path string) error {
 	var values map[string]interface{}
 	if err := json.Unmarshal(data, &values); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	for key := range values {
+		result.Sources[key] = path
 	}
 	merge(result.Values, values)
 	result.Files = append(result.Files, path)

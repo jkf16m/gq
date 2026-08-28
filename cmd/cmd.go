@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,9 +21,14 @@ import (
 	"golang.org/x/term"
 
 	"gq/config"
+	"gq/project"
+	gqsession "gq/session"
 )
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+const (
+	openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	defaultModel  = "@preset/mimo"
+)
 
 var rootCmd = &cobra.Command{
 	Use: "gq", Short: "An agentic CLI tool",
@@ -83,6 +90,14 @@ func askSinglePrompt() error {
 	if err != nil {
 		return err
 	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("find working directory: %w", err)
+	}
+	projectFiles, err := project.LoadFiles(workingDirectory)
+	if err != nil {
+		return fmt.Errorf("load project files: %w", err)
+	}
 
 	apiKey, err := getOpenRouterAPIKey()
 	if err != nil {
@@ -99,26 +114,41 @@ func askSinglePrompt() error {
 	}
 
 	messages := make([]message, 0, 2)
-	if loadedConfig.Context != "" {
-		messages = append(messages, message{Role: "system", Content: loadedConfig.Context})
+	contextText := loadedConfig.Context
+	projectContext := project.Context(projectFiles)
+	if projectContext != "" {
+		if contextText != "" {
+			contextText += "\n\n"
+		}
+		contextText += projectContext
+	}
+	if contextText != "" {
+		messages = append(messages, message{Role: "system", Content: contextText})
 	}
 	messages = append(messages, message{Role: "user", Content: input})
-	return runConversation(apiKey, messages, false)
+	return runConversation(apiKey, messages, false, modelFromConfig(loadedConfig))
 }
 
-func runConversation(apiKey string, messages []message, continuing bool) error {
+func modelFromConfig(cfg config.Result) string {
+	if m, ok := cfg.Values["model"].(string); ok && m != "" {
+		return m
+	}
+	return defaultModel
+}
+
+func runConversation(apiKey string, messages []message, continuing bool, model string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := saveSession(messages, !continuing); err != nil {
 		return err
 	}
 	if continuing {
-		if err := handlePendingTools(messages); err != nil {
+		if err := handlePendingTools(ctx, messages); err != nil {
 			return err
 		}
 	}
 	for step := 0; step < 20; step++ {
-		response, err := complete(ctx, apiKey, messages)
+		response, err := complete(ctx, apiKey, messages, model)
 		if err != nil {
 			return err
 		}
@@ -146,7 +176,8 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				return fmt.Errorf("invalid cmd arguments: %w", err)
 			}
-			approved, err := approveToolCall()
+			printToolCommand(args.Command)
+			approved, err := approveToolCall(ctx)
 			if err != nil {
 				return err
 			}
@@ -157,7 +188,10 @@ func runConversation(apiKey string, messages []message, continuing bool) error {
 				}
 				continue
 			}
-			output, exitCode := runCommand(args.Command)
+			output, exitCode := runCommand(ctx, args.Command)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			printToolResult(args.Command, output, exitCode)
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: fmt.Sprintf("exit code: %d\n%s", exitCode, output)})
 			if err := saveSession(messages, false); err != nil {
@@ -173,25 +207,21 @@ func continueSession() error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".gq", "sessions", "last.jsonl")
+	path := filepath.Join(home, ".gq", "sessions", "last.gq")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read last session: %w", err)
 	}
-	var messages []message
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		var msg message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			return fmt.Errorf("parse session: %w", err)
-		}
-		messages = append(messages, msg)
+	messages, err := parseGQSession(data)
+	if err != nil {
+		return fmt.Errorf("parse session: %w", err)
 	}
 	if len(messages) == 0 {
 		return fmt.Errorf("last session is empty")
 	}
+	// Leave incomplete tool calls intact. runConversation will present them to
+	// the user for approval and append their results before asking the model to
+	// continue.
 	fmt.Print("\033[1;36mgq\033[0m \033[1;36m›\033[0m ")
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(input) == 0 {
@@ -206,10 +236,18 @@ func continueSession() error {
 	if err != nil {
 		return err
 	}
-	return runConversation(apiKey, messages, true)
+	applicationPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find application path: %w", err)
+	}
+	loadedConfig, err := config.Load("", home, filepath.Dir(applicationPath))
+	if err != nil {
+		return err
+	}
+	return runConversation(apiKey, messages, true, modelFromConfig(loadedConfig))
 }
 
-func handlePendingTools(messages []message) error {
+func handlePendingTools(ctx context.Context, messages []message) error {
 	completed := make(map[string]bool)
 	for _, msg := range messages {
 		if msg.Role == "tool" {
@@ -233,7 +271,8 @@ func handlePendingTools(messages []message) error {
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				return err
 			}
-			approved, err := approveToolCall()
+			printToolCommand(args.Command)
+			approved, err := approveToolCall(ctx)
 			if err != nil {
 				return err
 			}
@@ -241,7 +280,10 @@ func handlePendingTools(messages []message) error {
 			if !approved {
 				content = "Tool call rejected by user."
 			} else {
-				output, code := runCommand(args.Command)
+				output, code := runCommand(ctx, args.Command)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				printToolResult(args.Command, output, code)
 				content = fmt.Sprintf("exit code: %d\n%s", code, output)
 			}
@@ -284,33 +326,67 @@ func saveSession(messages []message, replace bool) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "last.jsonl")
-	flag := os.O_CREATE | os.O_WRONLY
+	path := filepath.Join(dir, "last.gq")
 	if replace {
-		flag |= os.O_TRUNC
-	} else {
-		flag |= os.O_APPEND
-	}
-	file, err := os.OpenFile(path, flag, 0600)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if replace {
-		for _, msg := range messages {
-			data, _ := json.Marshal(msg)
-			fmt.Fprintln(file, string(data))
-		}
-	} else {
-		// Rewrite to avoid duplicating messages as the in-memory conversation grows.
-		if err := file.Close(); err != nil {
-			return err
-		}
-		data, _ := json.Marshal(messages)
-		_ = data
 		return writeSession(path, messages)
 	}
+	// Rewrite to avoid duplicating messages as the in-memory conversation grows.
+	return writeSession(path, messages)
+}
+
+func writeGQMessage(file *os.File, msg message) error {
+	content, _ := msg.Content.(string)
+	var lines []string
+	switch msg.Role {
+	case "assistant":
+		lines = append(lines, "a "+gqsession.Escape(content))
+		for _, call := range msg.ToolCalls {
+			id := call.ID
+			if strings.ContainsAny(id, " \t") {
+				id = strconv.Quote(id)
+			}
+			lines = append(lines, fmt.Sprintf("t %s %s arguments=%s", id, call.Function.Name, strconv.Quote(gqsession.Escape(call.Function.Arguments))))
+		}
+	case "user":
+		lines = append(lines, "u "+gqsession.Escape(content))
+	case "tool":
+		id := msg.ToolCallID
+		if strings.ContainsAny(id, " \t") {
+			id = strconv.Quote(id)
+		}
+		lines = append(lines, "tr "+id+" "+gqsession.Escape(content))
+	case "system":
+		// System context is reconstructed from configuration for new prompts.
+		// Continuation sessions do not persist it in the compact format.
+		return nil
+	default:
+		return fmt.Errorf("unsupported session message role %q", msg.Role)
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(file, line); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func parseGQSession(data []byte) ([]message, error) {
+	parsed, err := gqsession.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]message, 0, len(parsed))
+	for _, msg := range parsed {
+		converted := message{Role: msg.Role, Content: msg.Content, ToolCallID: msg.ToolCallID}
+		for _, call := range msg.ToolCalls {
+			convertedCall := toolCall{ID: call.ID, Type: call.Type}
+			convertedCall.Function.Name = call.Name
+			convertedCall.Function.Arguments = call.Arguments
+			converted.ToolCalls = append(converted.ToolCalls, convertedCall)
+		}
+		messages = append(messages, converted)
+	}
+	return messages, nil
 }
 
 func writeSession(path string, messages []message) error {
@@ -320,16 +396,15 @@ func writeSession(path string, messages []message) error {
 	}
 	defer file.Close()
 	for _, msg := range messages {
-		data, _ := json.Marshal(msg)
-		if _, err := fmt.Fprintln(file, string(data)); err != nil {
+		if err := writeGQMessage(file, msg); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func complete(ctx context.Context, apiKey string, messages []message) (chatResponse, error) {
-	body, err := json.Marshal(chatRequest{Model: "openai/gpt-5.6-luna", Messages: messages, Tools: []tool{{Type: "function", Function: functionDefinition{Name: "cmd", Description: "Run one bash command in the current project. Return the command as a bash string.", Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"command": map[string]string{"type": "string", "description": "The bash command to run"}}, "required": []string{"command"}}}}}})
+func complete(ctx context.Context, apiKey string, messages []message, model string) (chatResponse, error) {
+	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Tools: []tool{{Type: "function", Function: functionDefinition{Name: "cmd", Description: "Run one bash command in the current project. Return the command as a bash string.", Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"command": map[string]string{"type": "string", "description": "The bash command to run"}}, "required": []string{"command"}}}}}})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("encode request: %w", err)
 	}
@@ -361,7 +436,7 @@ func complete(ctx context.Context, apiKey string, messages []message) (chatRespo
 	return response, nil
 }
 
-func approveToolCall() (bool, error) {
+func approveToolCall(ctx context.Context) (bool, error) {
 	tty, err := openApprovalTTY()
 	if err != nil {
 		return false, err
@@ -371,7 +446,7 @@ func approveToolCall() (bool, error) {
 	}
 
 	fd := int(tty.Fd())
-	if !!term.IsTerminal(fd) {
+	if !term.IsTerminal(fd) {
 		return false, fmt.Errorf("tool approval requires an interactive terminal")
 	}
 	oldState, err := term.MakeRaw(fd)
@@ -398,40 +473,29 @@ func approveToolCall() (bool, error) {
 	enters := 0
 	var firstEnter time.Time
 	for {
-		var timeout <-chan time.Time
-		var timer *time.Timer
-		if enters == 1 {
-			timer = time.NewTimer(time.Until(firstEnter.Add(2 * time.Second)))
-			timeout = timer.C
-		}
-
 		select {
-		case <-timeout:
-			enters = 0
+		case <-ctx.Done():
+			return false, ctx.Err()
 		case err := <-readErr:
-			if timer != nil {
-				timer.Stop()
-			}
 			return false, fmt.Errorf("read tool approval: %w", err)
 		case b := <-input:
-			if timer != nil {
-				timer.Stop()
+			if b == 3 { // Ctrl-C
+				return false, context.Canceled
 			}
-			switch b {
-			case 8, 127:
+			if b == 'c' || b == 'C' {
 				return false, nil
-			case '\r', '\n':
-				if enters == 0 {
-					enters = 1
-					firstEnter = time.Now()
-					continue
-				}
-				if time.Since(firstEnter) < 2*time.Second {
+			}
+			if b == 'o' || b == 'O' {
+				if enters == 1 && time.Since(firstEnter) < 2*time.Second {
 					return true, nil
 				}
 				enters = 1
 				firstEnter = time.Now()
+				continue
 			}
+			// Only consecutive o keypresses approve. Any other key resets
+			// the pending approval sequence.
+			enters = 0
 		}
 	}
 }
@@ -519,8 +583,8 @@ func wrapText(text string, width int) []string {
 	return wrapped
 }
 
-func runCommand(command string) (string, int) {
-	cmd := exec.Command("bash", "-c", command)
+func runCommand(ctx context.Context, command string) (string, int) {
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return string(output), 0
@@ -576,8 +640,13 @@ func startSpinner(ctx context.Context) func() {
 	}
 }
 
-func printToolResult(command, output string, exitCode int) {
+func printToolCommand(command string) {
 	fmt.Printf("\n \033[2m$ %s\033[0m\n", command)
+	fmt.Print(" Press o twice to approve, c to cancel: ")
+}
+
+func printToolResult(command, output string, exitCode int) {
+	_ = command
 	fmt.Printf(" exit code: %d\n", exitCode)
 	if output != "" {
 		for _, line := range strings.Split(strings.TrimRight(output, "\n"), "\n") {
@@ -587,9 +656,93 @@ func printToolResult(command, output string, exitCode int) {
 	fmt.Println()
 }
 
+func showInfo() error {
+	applicationPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find application path: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home directory: %w", err)
+	}
+	loadedConfig, err := config.Load("", home, filepath.Dir(applicationPath))
+	if err != nil {
+		return err
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("find working directory: %w", err)
+	}
+	files, err := project.LoadFiles(workingDirectory)
+	if err != nil {
+		return fmt.Errorf("load project files: %w", err)
+	}
+	contextText := loadedConfig.Context
+	projectContext := project.Context(files)
+	if projectContext != "" {
+		if contextText != "" {
+			contextText += "\n\n"
+		}
+		contextText += projectContext
+	}
+	fmt.Println("Files loaded into system prompt:")
+	if loadedConfig.Context != "" {
+		fmt.Println("  configured context")
+	}
+	for _, file := range files {
+		fmt.Printf("  %s\n", file.Path)
+	}
+	fmt.Printf("\nTotal characters: %d\n", len(contextText))
+	return nil
+}
+
+func showConfig() error {
+	applicationPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find application path: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home directory: %w", err)
+	}
+	loadedConfig, err := config.Load("", home, filepath.Dir(applicationPath))
+	if err != nil {
+		return err
+	}
+	fmt.Println("\033[1;36mgq\033[0m configuration:")
+	fmt.Println()
+	if len(loadedConfig.Values) == 0 {
+		fmt.Println("  No configuration values set.")
+	} else {
+		keys := make([]string, 0, len(loadedConfig.Values))
+		for key := range loadedConfig.Values {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			value := loadedConfig.Values[key]
+			source := loadedConfig.Sources[key]
+			fmt.Printf("  \033[1m%s\033[0m = %v\n", key, value)
+			fmt.Printf("    source: %s\n", source)
+		}
+	}
+	fmt.Println()
+	fmt.Println("\033[1mConfig files loaded:\033[0m")
+	if len(loadedConfig.Files) == 0 {
+		fmt.Println("  None")
+	} else {
+		for _, f := range loadedConfig.Files {
+			fmt.Printf("  %s\n", f)
+		}
+	}
+	return nil
+}
+
 func Execute() error { return rootCmd.Execute() }
 func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(modelCmd)
 	rootCmd.AddCommand(&cobra.Command{Use: "c", Aliases: []string{"continue"}, Short: "Continue the last session", RunE: func(cmd *cobra.Command, args []string) error { return continueSession() }})
+	rootCmd.AddCommand(&cobra.Command{Use: "config", Short: "Show current configuration and its sources", RunE: func(cmd *cobra.Command, args []string) error { return showConfig() }})
+	rootCmd.AddCommand(&cobra.Command{Use: "info", Aliases: []string{"i"}, Short: "Show the context sent to the model", RunE: func(cmd *cobra.Command, args []string) error { return showInfo() }})
 }
