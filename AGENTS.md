@@ -14,6 +14,7 @@ We start from private implementation, writing tests to check if they're good, un
 Use `build.go` from the repository root:
 
 ```bash
+go run build.go install  # install gq to $GOPATH/bin/
 go run build.go build    # build gq binary to bin/
 go run build.go clean    # remove bin/
 ```

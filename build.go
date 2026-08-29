@@ -13,6 +13,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run build.go <command>")
 		fmt.Println("Commands:")
+		fmt.Println("  install - Install gq to $GOPATH/bin/")
 		fmt.Println("  build   - Build gq binary to bin/")
 		fmt.Println("  clean   - Remove bin/ directory")
 		os.Exit(1)
@@ -27,6 +28,18 @@ func main() {
 	binDir := filepath.Join(root, "bin")
 
 	switch os.Args[1] {
+	case "install":
+		fmt.Println("Installing gq...")
+		cmd := exec.Command("go", "install", ".")
+		cmd.Dir = filepath.Join(root, "gq")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error installing gq: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Installed to $GOPATH/bin/gq")
+
 	case "build":
 		if err := os.MkdirAll(binDir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating bin directory: %v\n", err)

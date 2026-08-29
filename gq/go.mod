@@ -1,4 +1,4 @@
-module github.com/user/gq
+module github.com/jkf16m/gq
 
 go 1.27.0
 
