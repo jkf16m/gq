@@ -1,7 +1,4 @@
-gq
 bin/
-pkg/
-src/
-gq-0.1.0/
-*.pkg.tar.zst
-*.tar.gz
+*.exe
+*.test
+*.out
