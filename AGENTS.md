@@ -1,4 +1,6 @@
-# AGENTS.md
+# gq
+
+CLI agent that executes bash commands through an LLM.
 
 ## Architecture
 
@@ -7,7 +9,12 @@ Every module is composed of two parts or more:
 1. **Public API** — minimal, contract only. No implementation.
 2. **Private implementation** — can be divided into several files.
 
-We start from private implementation, writing tests to check if they're good, until they're all working as expected. Then we move into the public API. Public API is no longer first approach, it's the end result.
+## Modules
+
+- **gq/** — CLI entry point, agent orchestration
+- **gq/llm/** — OpenRouter API client
+- **gq/config/** — Configuration loading
+- **gq/session/** — Session persistence
 
 ## Build
 
